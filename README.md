@@ -3,14 +3,16 @@
 A lightweight Python server that exposes Google Docs and Gmail as HTTP endpoints.
 Send markdown-formatted content and it renders as properly styled Docs headings/bullets and professional HTML emails — not plain text walls.
 
+**Live deployment:** `https://mcp-server-google-695514226672.europe-west1.run.app`
+
 ## Features
 
 - `POST /append_to_doc` — append formatted content to any Google Doc
 - `POST /create_email_draft` — create a styled HTML Gmail draft
 - Markdown rendering: headings, bold, italic, bullet lists, dividers
 - Operator approval gate before every Google API call (or auto-approve for pipelines)
-- Optional API key authentication
-- Docker + Railway ready (credentials injected via env vars — never baked into image)
+- Optional API key authentication via `X-Api-Key` request header
+- Deployed on Google Cloud Run — continuous deployment from GitHub via Cloud Build
 
 ---
 
@@ -66,30 +68,38 @@ curl http://localhost:8000/health
 
 | Variable | Default | Description |
 |---|---|---|
-| `SERVER_API_KEY` | *(unset)* | If set, all endpoints require `X-API-Key: <value>` |
-| `APPROVAL_MODE` | `terminal` | `terminal` = operator prompt in TTY; `auto` = approve all |
-| `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Path to OAuth client credentials |
-| `GOOGLE_TOKEN_PATH` | `token.json` | Path to cached OAuth token |
-| `PORT` | `8000` | HTTP listen port |
+| `SERVER_API_KEY` | *(unset)* | Server-side secret. When set, all endpoints require the HTTP header `X-Api-Key: <value>` |
+| `APPROVAL_MODE` | `terminal` | `terminal` = operator prompt in TTY; `auto` = approve all (required on Cloud Run) |
+| `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Path to OAuth client credentials (local dev) |
+| `GOOGLE_TOKEN_PATH` | `token.json` | Path to cached OAuth token (local dev) |
+| `GOOGLE_CREDENTIALS_JSON` | *(unset)* | Raw JSON content of `credentials.json` — injected by Cloud Run from Secret Manager |
+| `GOOGLE_TOKEN_JSON` | *(unset)* | Raw JSON content of `token.json` — injected by Cloud Run from Secret Manager |
+| `PORT` | `8000` | HTTP listen port — Cloud Run injects this automatically |
 
-Copy `.env.example` to `.env` and fill in values.
+> **`SERVER_API_KEY` vs `X-Api-Key`:** `SERVER_API_KEY` is the environment variable the server reads. `X-Api-Key` is the HTTP request header clients must send. They are not the same thing — do not add `X-API-KEY` as an env var.
+
+Copy `.env.example` to `.env` and fill in values for local development.
 
 ---
 
 ## API Reference
 
-All mutating endpoints require `X-API-Key` when `SERVER_API_KEY` is set.
+All mutating endpoints require `X-Api-Key` when `SERVER_API_KEY` is set.
 
 ### Append to a Google Doc
 
 ```bash
-curl -X POST http://localhost:8000/append_to_doc \
+SERVICE_URL="https://mcp-server-google-695514226672.europe-west1.run.app"
+API_KEY="PASTE_YOUR_API_KEY_HERE"
+
+cat > payload.json <<'EOF'
+{"doc_id":"YOUR_GOOGLE_DOC_ID","content":"# Section\n\n**Key point:** something important.\n\n- Item one\n- Item two"}
+EOF
+
+curl -i -X POST "$SERVICE_URL/append_to_doc" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-key" \
-  -d '{
-    "doc_id": "YOUR_DOC_ID",
-    "content": "# Section\n\n**Key point:** something important.\n\n- Item one\n- Item two"
-  }'
+  -H "X-Api-Key: $API_KEY" \
+  --data-binary @payload.json
 ```
 
 ```json
@@ -101,14 +111,17 @@ curl -X POST http://localhost:8000/append_to_doc \
 ### Create a Gmail draft
 
 ```bash
-curl -X POST http://localhost:8000/create_email_draft \
+SERVICE_URL="https://mcp-server-google-695514226672.europe-west1.run.app"
+API_KEY="PASTE_YOUR_API_KEY_HERE"
+
+cat > payload.json <<'EOF'
+{"to":"recipient@example.com","subject":"Project Update","body":"# Project Update\n\n**Status:** On track\n\n- Milestone A complete\n- Milestone B in progress\n\n*Regards*"}
+EOF
+
+curl -i -X POST "$SERVICE_URL/create_email_draft" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-key" \
-  -d '{
-    "to": "recipient@example.com",
-    "subject": "Project Update",
-    "body": "# Project Update\n\n**Status:** On track\n\n- Milestone A complete\n- Milestone B in progress\n\n*Regards*"
-  }'
+  -H "X-Api-Key: $API_KEY" \
+  --data-binary @payload.json
 ```
 
 ```json
@@ -117,14 +130,14 @@ curl -X POST http://localhost:8000/create_email_draft \
 
 The draft appears in Gmail → Drafts with full HTML formatting (600 px card, proper heading hierarchy, bullet lists).
 
-### Health check
+### Health check (no auth required)
 
 ```bash
-curl http://localhost:8000/health
+curl https://mcp-server-google-695514226672.europe-west1.run.app/health
 # → {"status":"ok"}
 ```
 
-Interactive docs: `http://localhost:8000/docs`
+Interactive docs: `http://localhost:8000/docs` (local only)
 
 ---
 
@@ -154,29 +167,34 @@ docker run -d \
 
 ## Deploy to Cloud Run
 
-Every push to `main` triggers Cloud Run's built-in continuous deployment (GitHub → Cloud Build → Cloud Run). Credentials are stored in Google Secret Manager and injected at runtime — never committed or baked into the image.
+The service is live and continuously deployed via Cloud Run's built-in GitHub integration.
+
+| Detail | Value |
+|---|---|
+| Project | NextLeap (`gen-lang-client-0491576843`) |
+| Service | `mcp-server-google` |
+| Region | `europe-west1` |
+| URL | `https://mcp-server-google-695514226672.europe-west1.run.app` |
+| Deployment | Cloud Run built-in CD: push to `main` → Cloud Build → Cloud Run |
+| Auth | Allow unauthenticated at Cloud Run level; app enforces `X-Api-Key` on mutating endpoints |
 
 ### How it works
 
-1. Cloud Run watches your GitHub repo (`main` branch)
-2. On each push, Cloud Build builds the Docker image and pushes it to Artifact Registry automatically
-3. Cloud Run deploys the new image
-4. `start.sh` writes `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (injected from Secret Manager) to `/tmp` before uvicorn starts
+1. Push to `main` → Cloud Build triggers automatically
+2. Cloud Build builds the Docker image and pushes it to Artifact Registry (managed automatically)
+3. Cloud Run deploys the new revision
+4. At startup, `start.sh` writes `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (from Secret Manager) to `/tmp`, sets path env vars, then starts uvicorn
 
-### Quick setup
+### Cloud Run environment
 
-1. Enable APIs: `run.googleapis.com`, `cloudbuild.googleapis.com`, `artifactregistry.googleapis.com`, `secretmanager.googleapis.com`
-2. Create three secrets in Secret Manager: `google-mcp-credentials`, `google-mcp-token`, `google-mcp-api-key`
-3. Grant the runtime service account `roles/secretmanager.secretAccessor` on each secret
-4. Cloud Run Console → **Create Service → Continuously deploy from repository** → connect `md-ammar-97/mcp-server-google`, branch `main`, build type `Dockerfile`
-5. Add env var `APPROVAL_MODE=auto` and link the three secrets as `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_TOKEN_JSON`, `SERVER_API_KEY`
+| Variable | Source | Value |
+|---|---|---|
+| `APPROVAL_MODE` | Plain env var | `auto` |
+| `GOOGLE_CREDENTIALS_JSON` | Secret Manager: `google-mcp-credentials:latest` | Raw `credentials.json` content |
+| `GOOGLE_TOKEN_JSON` | Secret Manager: `google-mcp-token:latest` | Raw `token.json` content |
+| `SERVER_API_KEY` | Secret Manager: `google-mcp-api-key:latest` | Backend API key |
 
-```bash
-curl https://YOUR_SERVICE_URL/health
-# → {"status":"ok"}
-```
-
-For the full step-by-step guide with exact `gcloud` commands see [`deployment_plan.md`](deployment_plan.md).
+For the full setup guide, API key rotation, log commands, and troubleshooting see [`deployment_plan.md`](deployment_plan.md).
 
 ---
 
@@ -186,8 +204,9 @@ For the full step-by-step guide with exact `gcloud` commands see [`deployment_pl
 |---|---|---|
 | `credentials.json` | OAuth 2.0 client secret | No — `.gitignore` |
 | `token.json` | Cached user OAuth token | No — `.gitignore` |
-| `.env` | Runtime secrets | No — `.gitignore` |
+| `.env` | Local secrets | No — `.gitignore` |
 
-- Set `SERVER_API_KEY` to a strong random value in production
-- Keep `APPROVAL_MODE=terminal` when running locally — it requires explicit `y` before any Google API call
-- HTTPS is provided automatically by Railway; for VPS use nginx + Let's Encrypt
+- `SERVER_API_KEY` is stored in Google Secret Manager in production — never in code or committed files
+- `APPROVAL_MODE=terminal` is the safe default locally — requires explicit `y` before any Google API call
+- Cloud Run provides managed TLS on `*.run.app` automatically
+- No GitHub Actions, no `GCP_SA_KEY` / `GCP_PROJECT_ID` secrets needed in GitHub

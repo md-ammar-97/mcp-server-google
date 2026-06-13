@@ -59,15 +59,17 @@ Gmail drafts are sent as `multipart/alternative` (plain text + styled HTML card)
 
 | Variable | Default | Description |
 |---|---|---|
-| `SERVER_API_KEY` | *(unset)* | If set, all non-health endpoints require `X-API-Key: <value>` |
-| `APPROVAL_MODE` | `terminal` | `terminal` = operator prompt; `auto` = approve all (trusted pipelines only) |
+| `SERVER_API_KEY` | *(unset)* | If set, all non-health endpoints require `X-Api-Key: <value>` HTTP header |
+| `APPROVAL_MODE` | `terminal` | `terminal` = operator prompt; `auto` = approve all (required on Cloud Run) |
 | `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Path to OAuth 2.0 client credentials file (local dev) |
 | `GOOGLE_TOKEN_PATH` | `token.json` | Path to cached OAuth token file (local dev) |
 | `GOOGLE_CREDENTIALS_JSON` | *(unset)* | Raw JSON string of `credentials.json` — injected by Cloud Run from Secret Manager |
 | `GOOGLE_TOKEN_JSON` | *(unset)* | Raw JSON string of `token.json` — injected by Cloud Run from Secret Manager |
 | `GOOGLE_CREDENTIALS_B64` | *(unset)* | Base64-encoded `credentials.json` — alternative for plain Docker |
 | `GOOGLE_TOKEN_B64` | *(unset)* | Base64-encoded `token.json` — alternative for plain Docker |
-| `PORT` | `8000` | HTTP listen port (Cloud Run and Railway inject this automatically) |
+| `PORT` | `8000` | HTTP listen port (Cloud Run injects this automatically) |
+
+> **`SERVER_API_KEY` vs `X-Api-Key`:** `SERVER_API_KEY` is the env var the server reads. `X-Api-Key` is the HTTP request header clients must send. Do not add `X-API-KEY` as an env var — it is not read by the application.
 
 Copy `.env.example` to `.env` and fill in values before running.
 
@@ -190,11 +192,20 @@ Obtain a certificate with `certbot --nginx -d mcp.yourdomain.com`.
 
 ---
 
-## Option D: GitHub + Google Cloud Run
+## Option D: GitHub + Google Cloud Run ✅ LIVE
 
-**Project:** NextLeap (`gen-lang-client-0491576843`) · **Region:** `us-central1`
+**Status: Deployed and working**
 
-Deployment uses Cloud Run's built-in **"Continuously deploy from repository"** feature. Every push to `main` triggers Cloud Build, which builds the Docker image, pushes it to Artifact Registry (managed automatically — no manual repo needed), and deploys to Cloud Run. No GitHub Actions workflow or deployer service account is required.
+| Detail | Value |
+|---|---|
+| Project | NextLeap (`gen-lang-client-0491576843`) |
+| Service | `mcp-server-google` |
+| Region | `europe-west1` |
+| URL | `https://mcp-server-google-695514226672.europe-west1.run.app` |
+| CD | Cloud Run built-in: push to `main` → Cloud Build → Cloud Run |
+| Repository | `md-ammar-97/mcp-server-google` |
+
+Deployment uses Cloud Run's built-in **"Continuously deploy from repository"** feature. Every push to `main` triggers Cloud Build, which builds the Docker image, pushes it to Artifact Registry (managed automatically — no manual repo needed), and deploys to Cloud Run. No GitHub Actions workflow, no `GCP_SA_KEY` / `GCP_PROJECT_ID` secrets in GitHub, no deployer service account required.
 
 **How credentials flow at runtime:**
 Cloud Run injects `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (from Secret Manager) as environment variables → `start.sh` writes them to `/tmp/credentials.json` and `/tmp/token.json` → sets `GOOGLE_CREDENTIALS_PATH` / `GOOGLE_TOKEN_PATH` → `auth.py` reads from those paths.
@@ -203,7 +214,7 @@ Cloud Run injects `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (from Secret
 
 ### Step 1 — token.json (already done — skip)
 
-`token.json` was pre-generated locally. Skip this step unless you get `invalid_grant` later.
+`token.json` was pre-generated locally and stored in Secret Manager. Skip this step unless you get `invalid_grant` later.
 
 ---
 
@@ -293,8 +304,8 @@ Continue to service configuration:
 
 | Setting | Value |
 |---|---|
-| Service name | `google-mcp-server` |
-| Region | `us-central1` |
+| Service name | `mcp-server-google` |
+| Region | `europe-west1` |
 | Authentication | **Allow unauthenticated invocations** |
 | Minimum instances | `0` |
 | Maximum instances | `2` |
@@ -316,6 +327,7 @@ Add secrets as environment variables:
 | `SERVER_API_KEY` | `google-mcp-api-key` | `latest` |
 
 > Do **not** set `PORT` — Cloud Run injects it automatically.
+> Do **not** add `X-API-KEY` as an env var — it is not read by the application.
 
 Click **Create**. Cloud Build triggers immediately.
 
@@ -333,39 +345,90 @@ A successful first build takes 2–4 minutes. The service URL appears in the Clo
 
 ```powershell
 # Health check (no auth)
-curl https://YOUR_SERVICE_URL/health
+curl https://mcp-server-google-695514226672.europe-west1.run.app/health
 # → {"status":"ok"}
 
 # Gmail draft
-curl -X POST https://YOUR_SERVICE_URL/create_email_draft `
+curl -X POST https://mcp-server-google-695514226672.europe-west1.run.app/create_email_draft `
   -H "Content-Type: application/json" `
-  -H "X-API-Key: YOUR_API_KEY" `
+  -H "X-Api-Key: YOUR_API_KEY" `
   -d '{"to":"mohdammar97@gmail.com","subject":"Cloud Run Test","body":"# Test\n\n**Works from Cloud Run!**\n\n- Point one\n- Point two"}'
 # → {"status":"ok","draft_id":"..."}
 
 # Google Doc append
-curl -X POST https://YOUR_SERVICE_URL/append_to_doc `
+curl -X POST https://mcp-server-google-695514226672.europe-west1.run.app/append_to_doc `
   -H "Content-Type: application/json" `
-  -H "X-API-Key: YOUR_API_KEY" `
+  -H "X-Api-Key: YOUR_API_KEY" `
   -d '{"doc_id":"YOUR_DOC_ID","content":"# Cloud Run Test\n\nAppended from production."}'
 # → {"status":"ok","doc_id":"...","chars_added":...}
 ```
 
 ---
 
-### Token rotation
-
-If you get `invalid_grant`, regenerate `token.json` locally and push a new version:
+### Logs
 
 ```powershell
+gcloud run services logs read mcp-server-google `
+  --region europe-west1 `
+  --project gen-lang-client-0491576843 `
+  --limit 100
+```
+
+---
+
+### API Key rotation
+
+Run these in a terminal where `gcloud` is authenticated:
+
+```powershell
+# 1. Generate a new key
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$NEW_KEY = [Convert]::ToBase64String($bytes)
+Write-Host "New API key: $NEW_KEY"
+
+# 2. Push a new secret version
+Set-Content -NoNewline -Path .\server_api_key.txt -Value $NEW_KEY
+gcloud secrets versions add google-mcp-api-key `
+  --data-file="server_api_key.txt" `
+  --project gen-lang-client-0491576843
+Remove-Item .\server_api_key.txt
+
+# 3. Redeploy Cloud Run to pick up the new version
+gcloud run services update mcp-server-google `
+  --region europe-west1 `
+  --project gen-lang-client-0491576843 `
+  --update-secrets SERVER_API_KEY=google-mcp-api-key:latest
+
+# 4. Update local .env if needed
+#    SERVER_API_KEY="<new key>"
+
+# 5. Disable the old secret version (optional — list first)
+gcloud secrets versions list google-mcp-api-key --project gen-lang-client-0491576843
+# gcloud secrets versions disable VERSION_ID --secret google-mcp-api-key --project gen-lang-client-0491576843
+```
+
+---
+
+### Token rotation (invalid_grant)
+
+If you see `invalid_grant` in Cloud Run logs:
+
+```powershell
+# 1. Re-run OAuth on a machine with a browser
 python -c "from auth import get_credentials; get_credentials()"
 
+# 2. Push a new secret version
 gcloud secrets versions add google-mcp-token `
   --data-file="token.json" `
   --project gen-lang-client-0491576843
-```
 
-Then push any commit to `main` (or redeploy from the console) to pick up the new version.
+# 3. Redeploy to pick up the new version
+gcloud run services update mcp-server-google `
+  --region europe-west1 `
+  --project gen-lang-client-0491576843 `
+  --update-secrets GOOGLE_TOKEN_JSON=google-mcp-token:latest
+```
 
 ---
 
@@ -377,21 +440,37 @@ Then push any commit to `main` (or redeploy from the console) to pick up the new
 | Token refresh | The refresh token inside `token.json` is long-lived. Google auto-issues a new access token on each start — no manual re-auth needed between deploys. |
 | Artifact Registry | Cloud Build creates and manages the `cloud-run-source-deploy` repository automatically. |
 | Scale to zero | Cloud Run scales to zero when idle. Cold start takes ~2 s. `APPROVAL_MODE=auto` prevents terminal prompts from blocking cold starts. |
-| HTTPS | Cloud Run provides a managed TLS certificate on `*.run.app` automatically. |
+| HTTPS | Cloud Run provides a managed TLS certificate on `*.run.app` automatically. No nginx needed. |
 | Cost | Free tier: 2 M requests/month + 360,000 GB-s compute. Typical usage costs nothing. |
+| No GitHub Actions | Cloud Run built-in CD handles the entire build/deploy pipeline. No `.github/workflows/` needed. |
+
+---
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Build fails: `start.sh: not found` or `exec format error` | `start.sh` has CRLF line endings (Windows Git) | `.gitattributes` forces LF for `*.sh` — ensure it's committed |
+| 500 / `EOFError` on Cloud Run | `APPROVAL_MODE=terminal` with no TTY | Set `APPROVAL_MODE=auto` via: `gcloud run services update mcp-server-google --region europe-west1 --project gen-lang-client-0491576843 --update-env-vars APPROVAL_MODE=auto` |
+| Type conflict changing `SERVER_API_KEY` to a secret | Env var and secret reference conflict | Remove the plain env var first: `--remove-env-vars SERVER_API_KEY`, then add secret: `--update-secrets SERVER_API_KEY=google-mcp-api-key:latest` |
+| `invalid_grant` | `token.json` expired or revoked | Re-run OAuth locally → `gcloud secrets versions add google-mcp-token` → redeploy |
+| `401 Unauthorized` | API key missing or wrong | Send `X-Api-Key: <value>` header matching `SERVER_API_KEY` |
+| `FileNotFoundError: credentials.json` | `GOOGLE_CREDENTIALS_PATH` wrong or secret not set | Verify `GOOGLE_CREDENTIALS_JSON` is set in Cloud Run from Secret Manager |
+| `403 secretmanager.secretAccessor` | Runtime SA lacks IAM binding | Re-run Step 4 IAM grants |
+| curl multiline failure: `-H: command not found` | Blank lines or trailing spaces after `\` in bash | Use `--data-binary @payload.json` with a `payload.json` file instead |
 
 ---
 
 ## Calling the API
 
-All mutating endpoints require `X-API-Key` if `SERVER_API_KEY` is set.
+All mutating endpoints require `X-Api-Key` if `SERVER_API_KEY` is set.
 
 ### Append to a Google Doc
 
 ```bash
 curl -X POST http://localhost:8000/append_to_doc \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-secret-key" \
+  -H "X-Api-Key: your-secret-key" \
   -d '{
     "doc_id": "YOUR_DOC_ID",
     "content": "# Section Title\n\nSome **bold** text and *italic* text.\n\n- Point one\n- Point two"
@@ -408,7 +487,7 @@ Response:
 ```bash
 curl -X POST http://localhost:8000/create_email_draft \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-secret-key" \
+  -H "X-Api-Key: your-secret-key" \
   -d '{
     "to": "recipient@example.com",
     "subject": "Project Update",
@@ -430,38 +509,27 @@ Response:
 | `credentials.json` | OAuth 2.0 Client ID (app identity) | Yes — never commit |
 | `token.json` | Cached user OAuth token (access + refresh) | Yes — never commit |
 
-Both files are in `.gitignore`. In Docker/CI environments:
-- Use bind mounts or secret management (AWS Secrets Manager, GCP Secret Manager, Vault)
-- Set `GOOGLE_CREDENTIALS_PATH` / `GOOGLE_TOKEN_PATH` to the mounted paths
-- Store `token.json` in a writable volume so token refreshes persist across container restarts
+Both files are in `.gitignore`. In production:
+- Both are stored in Google Secret Manager
+- Cloud Run injects them as `GOOGLE_CREDENTIALS_JSON` / `GOOGLE_TOKEN_JSON`
+- `start.sh` writes them to `/tmp` at container start
 
 Token expiry:
 - Access tokens expire every hour — the library refreshes them automatically using the refresh token
 - Refresh tokens are long-lived but can be revoked from Google Account settings
-- If `token.json` is lost or revoked, re-run the OAuth browser flow on a machine with a browser
+- If revoked: re-run the OAuth browser flow locally → push new version to Secret Manager → redeploy
 
 ---
 
 ## Security Checklist
 
-- [ ] `SERVER_API_KEY` is set to a strong random string in production
-- [ ] `APPROVAL_MODE=auto` is only used for trusted, authenticated callers
-- [ ] `credentials.json` and `token.json` are not committed to git
-- [ ] HTTPS is configured (TLS termination via nginx or cloud load balancer)
-- [ ] Server is not exposed on a public IP without HTTPS + API key
-- [ ] File permissions: `chmod 600 credentials.json token.json`
-- [ ] Token volume is writable so token refreshes persist
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `FileNotFoundError: credentials.json not found` | Credentials file missing or wrong path | Check `GOOGLE_CREDENTIALS_PATH`; download from Google Cloud Console |
-| `401 Unauthorized` on API call | `SERVER_API_KEY` set but header missing | Add `-H "X-API-Key: <key>"` to your request |
-| `422 Unprocessable Entity` | Invalid `doc_id` (empty) or bad email address | Check request payload |
-| `403 Forbidden: Action rejected by operator` | Operator typed `n` at approval prompt | Re-run and type `y`, or set `APPROVAL_MODE=auto` |
-| Token expired / `invalid_grant` | `token.json` is stale or revoked | Delete `token.json`, re-run OAuth browser flow |
-| Server hangs waiting for input in Docker | `APPROVAL_MODE` left as `terminal` in headless env | Set `APPROVAL_MODE=auto` in `.env` |
-| `google.auth.exceptions.TransportError` | No internet / firewall blocking Google APIs | Check outbound connectivity to `*.googleapis.com` |
+- [x] `SERVER_API_KEY` stored in Secret Manager — not in code or committed files
+- [x] `credentials.json` and `token.json` stored in Secret Manager — not committed to git
+- [x] `.env` in `.gitignore` — local secrets never committed
+- [x] `APPROVAL_MODE=auto` set in Cloud Run (headless environment)
+- [x] Cloud Run provides managed TLS — no manual HTTPS setup needed
+- [x] Non-root Docker user (`appuser`) in Dockerfile
+- [x] `.dockerignore` prevents secrets from entering Docker build context
+- [x] No GitHub Actions — no `GCP_SA_KEY` or `GCP_PROJECT_ID` secrets in GitHub
+- [ ] Rotate `SERVER_API_KEY` periodically (see API Key rotation section above)
+- [ ] Token volume is writable so token refreshes persist (handled by `/tmp` in Cloud Run)
