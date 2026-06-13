@@ -7,10 +7,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# credentials.json and token.json are excluded via .gitignore.
-# Supply them via GOOGLE_CREDENTIALS_B64 / GOOGLE_TOKEN_B64 env vars (Railway)
-# or bind-mount them at runtime (plain Docker).
-RUN chmod +x start.sh
+# Non-root user — required by Cloud Run best practices and many org policies.
+# /tmp is world-writable so start.sh can still write credential files there.
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup appuser && \
+    chown -R appuser:appgroup /app && \
+    chmod +x start.sh
+
+USER appuser
 
 EXPOSE 8000
 

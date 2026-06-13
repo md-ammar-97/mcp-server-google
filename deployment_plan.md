@@ -61,9 +61,13 @@ Gmail drafts are sent as `multipart/alternative` (plain text + styled HTML card)
 |---|---|---|
 | `SERVER_API_KEY` | *(unset)* | If set, all non-health endpoints require `X-API-Key: <value>` |
 | `APPROVAL_MODE` | `terminal` | `terminal` = operator prompt; `auto` = approve all (trusted pipelines only) |
-| `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Path to OAuth 2.0 client credentials file |
-| `GOOGLE_TOKEN_PATH` | `token.json` | Path to cached OAuth token file |
-| `PORT` | `8000` | HTTP listen port |
+| `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Path to OAuth 2.0 client credentials file (local dev) |
+| `GOOGLE_TOKEN_PATH` | `token.json` | Path to cached OAuth token file (local dev) |
+| `GOOGLE_CREDENTIALS_JSON` | *(unset)* | Raw JSON string of `credentials.json` — injected by Cloud Run from Secret Manager |
+| `GOOGLE_TOKEN_JSON` | *(unset)* | Raw JSON string of `token.json` — injected by Cloud Run from Secret Manager |
+| `GOOGLE_CREDENTIALS_B64` | *(unset)* | Base64-encoded `credentials.json` — alternative for plain Docker |
+| `GOOGLE_TOKEN_B64` | *(unset)* | Base64-encoded `token.json` — alternative for plain Docker |
+| `PORT` | `8000` | HTTP listen port (Cloud Run and Railway inject this automatically) |
 
 Copy `.env.example` to `.env` and fill in values before running.
 
@@ -186,13 +190,21 @@ Obtain a certificate with `certbot --nginx -d mcp.yourdomain.com`.
 
 ---
 
-## Option D: GitHub + Railway
+## Option D: GitHub + Google Cloud Run
 
-Railway builds from the Dockerfile and provides a public HTTPS URL with zero server management. Because `credentials.json` and `token.json` are excluded from git, they are passed in as base64-encoded environment variables and decoded to `/tmp` at container startup by `start.sh`.
+Every push to `main` triggers a GitHub Actions workflow that builds the Docker image, pushes it to Artifact Registry, and deploys it to Cloud Run. Credentials are stored in Google Secret Manager and injected at runtime — never committed or baked into the image.
 
-### 1. Pre-generate token.json locally (one-time)
+### Prerequisites
 
-The OAuth browser flow must run on a machine with a browser before deploying:
+- Google Cloud project with billing enabled
+- `gcloud` CLI installed and initialised (`gcloud init`)
+- This repo pushed to GitHub
+
+---
+
+### Step 1 — Pre-generate token.json locally (one-time)
+
+The OAuth browser flow must run on a machine with a browser:
 
 ```bash
 pip install -r requirements.txt
@@ -200,77 +212,162 @@ python -c "from auth import get_credentials; get_credentials()"
 # → Browser opens → approve → token.json is written
 ```
 
-### 2. Encode credentials for Railway
+---
 
-Run this in PowerShell from the project directory:
-
-```powershell
-$creds = [Convert]::ToBase64String([IO.File]::ReadAllBytes("credentials.json"))
-$token = [Convert]::ToBase64String([IO.File]::ReadAllBytes("token.json"))
-Write-Host "GOOGLE_CREDENTIALS_B64=$creds"
-Write-Host "GOOGLE_TOKEN_B64=$token"
-```
-
-Copy both output lines — you will paste the values into Railway.
-
-### 3. Push to GitHub
+### Step 2 — Enable required GCP APIs
 
 ```bash
-git init
-git add .        # .gitignore already excludes credentials.json, token.json, .env
-git commit -m "Initial commit"
-
-# Create a private repo and push (requires GitHub CLI)
-gh repo create google-mcp-server --private --source=. --push
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  cloudbuild.googleapis.com \
+  --project YOUR_PROJECT_ID
 ```
 
-Or create the repo on github.com manually and push:
+---
+
+### Step 3 — Create an Artifact Registry repository
 
 ```bash
-git remote add origin https://github.com/YOUR_USERNAME/google-mcp-server.git
-git branch -M main
-git push -u origin main
+gcloud artifacts repositories create google-mcp-server \
+  --repository-format=docker \
+  --location=us-central1 \
+  --project YOUR_PROJECT_ID
 ```
 
-### 4. Create a Railway project
+---
 
-1. Go to [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**
-2. Authorise Railway to access your GitHub account if prompted
-3. Select **google-mcp-server**
-4. Railway detects the `Dockerfile` automatically — no extra config needed
+### Step 4 — Store credentials in Secret Manager
 
-### 5. Set environment variables
+```bash
+# credentials.json → secret
+gcloud secrets create google-mcp-credentials \
+  --data-file=credentials.json \
+  --project YOUR_PROJECT_ID
 
-In the Railway dashboard: **your service → Variables → Add variable**
+# token.json → secret
+gcloud secrets create google-mcp-token \
+  --data-file=token.json \
+  --project YOUR_PROJECT_ID
 
-| Variable | Value |
+# API key → secret  (generate a strong random value)
+echo -n "YOUR_STRONG_API_KEY" | \
+  gcloud secrets create google-mcp-api-key --data-file=- \
+  --project YOUR_PROJECT_ID
+```
+
+Grant the Cloud Run runtime service account access to read them:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe YOUR_PROJECT_ID --format="value(projectNumber)")
+RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+for SECRET in google-mcp-credentials google-mcp-token google-mcp-api-key; do
+  gcloud secrets add-iam-policy-binding $SECRET \
+    --member="serviceAccount:$RUNTIME_SA" \
+    --role="roles/secretmanager.secretAccessor" \
+    --project YOUR_PROJECT_ID
+done
+```
+
+---
+
+### Step 5 — Create a GitHub Actions deployer service account
+
+```bash
+gcloud iam service-accounts create github-actions-deployer \
+  --display-name="GitHub Actions Deployer" \
+  --project YOUR_PROJECT_ID
+
+DEPLOYER_SA="github-actions-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+
+# Roles needed to build, push, and deploy
+for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser; do
+  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:$DEPLOYER_SA" \
+    --role="$ROLE"
+done
+
+# Download the key — you will add this to GitHub secrets
+gcloud iam service-accounts keys create github-actions-key.json \
+  --iam-account="$DEPLOYER_SA"
+```
+
+> `github-actions-key.json` is a secret — do not commit it. Add it to GitHub and delete the local file.
+
+---
+
+### Step 6 — Add GitHub repository secrets
+
+In your GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret name | Value |
 |---|---|
-| `SERVER_API_KEY` | Strong random string (e.g. `openssl rand -hex 32`) |
-| `APPROVAL_MODE` | `auto` |
-| `GOOGLE_CREDENTIALS_B64` | Value from step 2 |
-| `GOOGLE_TOKEN_B64` | Value from step 2 |
+| `GCP_PROJECT_ID` | Your Google Cloud project ID (e.g. `my-project-123`) |
+| `GCP_SA_KEY` | Full contents of `github-actions-key.json` |
 
-> Do **not** set `PORT` — Railway injects it automatically and `start.sh` reads it.
-
-### 6. Generate a public domain
-
-Railway dashboard → **your service → Settings → Networking → Generate Domain**
-
-### 7. Verify
+Then delete the local key file:
 
 ```bash
-curl https://your-app.up.railway.app/health
+del github-actions-key.json   # Windows
+# rm github-actions-key.json  # macOS / Linux
+```
+
+---
+
+### Step 7 — Push to trigger the first deploy
+
+The workflow in `.github/workflows/deploy.yml` runs automatically on every push to `main`:
+
+```bash
+git push origin main
+```
+
+Monitor progress: **GitHub repo → Actions tab**
+
+On success the workflow prints the Cloud Run service URL.
+
+---
+
+### Step 8 — Verify
+
+```bash
+curl https://YOUR_SERVICE_URL/health
 # → {"status":"ok"}
 ```
+
+The Cloud Run URL follows the pattern `https://google-mcp-server-XXXXXXXX-uc.a.run.app`.
+
+---
+
+### Token rotation
+
+When `token.json` needs to be refreshed:
+
+```bash
+# 1. Re-run OAuth locally to get a new token.json
+python -c "from auth import get_credentials; get_credentials()"
+
+# 2. Add a new version to the secret
+gcloud secrets versions add google-mcp-token \
+  --data-file=token.json \
+  --project YOUR_PROJECT_ID
+
+# 3. Re-deploy (or push any commit to main) to pick up the new version
+```
+
+---
 
 ### Notes
 
 | Topic | Detail |
 |---|---|
-| Token refresh | `token.json` is written to `/tmp` on each start from `GOOGLE_TOKEN_B64`. The embedded refresh token lets Google issue a fresh access token automatically — no manual re-auth needed. |
-| Token rotation | If you revoke and re-generate `token.json` locally, re-encode it, update `GOOGLE_TOKEN_B64` in Railway Variables, and trigger a redeploy. |
-| Sleep on free tier | Railway free-tier containers sleep after inactivity. `APPROVAL_MODE=auto` prevents terminal prompts from hanging on wake. |
-| Cost | The Hobby plan ($5/month) keeps the container always-on. The free tier is fine for occasional use. |
+| Credential injection | Cloud Run links `google-mcp-credentials` and `google-mcp-token` secrets as env vars (`GOOGLE_CREDENTIALS_JSON` / `GOOGLE_TOKEN_JSON`). `start.sh` writes them to `/tmp` and sets the path env vars before starting uvicorn. |
+| Token refresh | The embedded refresh token means Google auto-issues a new access token on each request — no manual re-auth between deployments. |
+| Scaling to zero | Cloud Run scales to zero when idle. `APPROVAL_MODE=auto` is set by the workflow so no terminal prompts block cold starts. |
+| HTTPS | Cloud Run provides a managed TLS certificate on the `*.run.app` domain automatically. Custom domains can be mapped in the Cloud Run console. |
+| Cost | The free tier includes 2 million requests/month and 360,000 GB-seconds of compute. Typical usage costs nothing. |
 
 ---
 
