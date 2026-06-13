@@ -1,0 +1,20 @@
+# never bake secrets into the image
+.env
+credentials.json
+client_secret_*.json
+token.json
+
+# venv is rebuilt during docker build — exclude to keep context small
+.venv/
+
+# python byte-cache
+__pycache__/
+*.pyc
+*.pyo
+
+# git metadata
+.git/
+.gitignore
+
+# local dev / docs — not needed at runtime
+deployment_plan.md
