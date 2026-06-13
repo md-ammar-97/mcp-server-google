@@ -192,170 +192,180 @@ Obtain a certificate with `certbot --nginx -d mcp.yourdomain.com`.
 
 ## Option D: GitHub + Google Cloud Run
 
-Every push to `main` triggers a GitHub Actions workflow that builds the Docker image, pushes it to Artifact Registry, and deploys it to Cloud Run. Credentials are stored in Google Secret Manager and injected at runtime — never committed or baked into the image.
+**Project:** NextLeap (`gen-lang-client-0491576843`) · **Region:** `us-central1`
 
-### Prerequisites
+Deployment uses Cloud Run's built-in **"Continuously deploy from repository"** feature. Every push to `main` triggers Cloud Build, which builds the Docker image, pushes it to Artifact Registry (managed automatically — no manual repo needed), and deploys to Cloud Run. No GitHub Actions workflow or deployer service account is required.
 
-- Google Cloud project with billing enabled
-- `gcloud` CLI installed and initialised (`gcloud init`)
-- This repo pushed to GitHub
+**How credentials flow at runtime:**
+Cloud Run injects `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (from Secret Manager) as environment variables → `start.sh` writes them to `/tmp/credentials.json` and `/tmp/token.json` → sets `GOOGLE_CREDENTIALS_PATH` / `GOOGLE_TOKEN_PATH` → `auth.py` reads from those paths.
 
 ---
 
-### Step 1 — Pre-generate token.json locally (one-time)
+### Step 1 — token.json (already done — skip)
 
-The OAuth browser flow must run on a machine with a browser:
-
-```bash
-pip install -r requirements.txt
-python -c "from auth import get_credentials; get_credentials()"
-# → Browser opens → approve → token.json is written
-```
+`token.json` was pre-generated locally. Skip this step unless you get `invalid_grant` later.
 
 ---
 
 ### Step 2 — Enable required GCP APIs
 
-```bash
-gcloud services enable \
-  run.googleapis.com \
-  artifactregistry.googleapis.com \
-  secretmanager.googleapis.com \
-  cloudbuild.googleapis.com \
-  --project YOUR_PROJECT_ID
+```powershell
+gcloud services enable `
+  run.googleapis.com `
+  cloudbuild.googleapis.com `
+  artifactregistry.googleapis.com `
+  secretmanager.googleapis.com `
+  docs.googleapis.com `
+  gmail.googleapis.com `
+  --project gen-lang-client-0491576843
+```
+
+`docs.googleapis.com` and `gmail.googleapis.com` may already be enabled — running this again is safe. Cloud Build stores the built image in Artifact Registry automatically; no manual repository creation is needed.
+
+---
+
+### Step 3 — Store credentials in Secret Manager
+
+Run from the project root where `credentials.json` and `token.json` exist.
+
+```powershell
+# credentials.json
+gcloud secrets create google-mcp-credentials `
+  --data-file="credentials.json" `
+  --project gen-lang-client-0491576843
+
+# token.json
+gcloud secrets create google-mcp-token `
+  --data-file="token.json" `
+  --project gen-lang-client-0491576843
+
+# API key — generate a strong random value
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$API_KEY = [Convert]::ToBase64String($bytes)
+Write-Host "Your API key: $API_KEY"   # copy this — you will need it to call the API
+
+Set-Content -NoNewline -Path .\server_api_key.txt -Value $API_KEY
+gcloud secrets create google-mcp-api-key `
+  --data-file="server_api_key.txt" `
+  --project gen-lang-client-0491576843
+Remove-Item .\server_api_key.txt
+```
+
+If any secret already exists, add a new version instead:
+
+```powershell
+gcloud secrets versions add google-mcp-credentials --data-file="credentials.json" --project gen-lang-client-0491576843
+gcloud secrets versions add google-mcp-token       --data-file="token.json"       --project gen-lang-client-0491576843
 ```
 
 ---
 
-### Step 3 — Create an Artifact Registry repository
+### Step 4 — Grant runtime service account access to secrets
 
-```bash
-gcloud artifacts repositories create google-mcp-server \
-  --repository-format=docker \
-  --location=us-central1 \
-  --project YOUR_PROJECT_ID
+```powershell
+$RUNTIME_SA = "695514226672-compute@developer.gserviceaccount.com"
+
+foreach ($SECRET in @("google-mcp-credentials","google-mcp-token","google-mcp-api-key")) {
+  gcloud secrets add-iam-policy-binding $SECRET `
+    --member="serviceAccount:$RUNTIME_SA" `
+    --role="roles/secretmanager.secretAccessor" `
+    --project gen-lang-client-0491576843
+}
 ```
 
 ---
 
-### Step 4 — Store credentials in Secret Manager
+### Step 5 — Create the Cloud Run service
 
-```bash
-# credentials.json → secret
-gcloud secrets create google-mcp-credentials \
-  --data-file=credentials.json \
-  --project YOUR_PROJECT_ID
+Go to [Google Cloud Console → Cloud Run](https://console.cloud.google.com/run) → **Create Service**.
 
-# token.json → secret
-gcloud secrets create google-mcp-token \
-  --data-file=token.json \
-  --project YOUR_PROJECT_ID
+Choose **"Continuously deploy from a repository"** → **Set up with Cloud Build**.
 
-# API key → secret  (generate a strong random value)
-echo -n "YOUR_STRONG_API_KEY" | \
-  gcloud secrets create google-mcp-api-key --data-file=- \
-  --project YOUR_PROJECT_ID
-```
-
-Grant the Cloud Run runtime service account access to read them:
-
-```bash
-PROJECT_NUMBER=$(gcloud projects describe YOUR_PROJECT_ID --format="value(projectNumber)")
-RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
-for SECRET in google-mcp-credentials google-mcp-token google-mcp-api-key; do
-  gcloud secrets add-iam-policy-binding $SECRET \
-    --member="serviceAccount:$RUNTIME_SA" \
-    --role="roles/secretmanager.secretAccessor" \
-    --project YOUR_PROJECT_ID
-done
-```
-
----
-
-### Step 5 — Create a GitHub Actions deployer service account
-
-```bash
-gcloud iam service-accounts create github-actions-deployer \
-  --display-name="GitHub Actions Deployer" \
-  --project YOUR_PROJECT_ID
-
-DEPLOYER_SA="github-actions-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com"
-
-# Roles needed to build, push, and deploy
-for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser; do
-  gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-    --member="serviceAccount:$DEPLOYER_SA" \
-    --role="$ROLE"
-done
-
-# Download the key — you will add this to GitHub secrets
-gcloud iam service-accounts keys create github-actions-key.json \
-  --iam-account="$DEPLOYER_SA"
-```
-
-> `github-actions-key.json` is a secret — do not commit it. Add it to GitHub and delete the local file.
-
----
-
-### Step 6 — Add GitHub repository secrets
-
-In your GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret name | Value |
+| Setting | Value |
 |---|---|
-| `GCP_PROJECT_ID` | Your Google Cloud project ID (e.g. `my-project-123`) |
-| `GCP_SA_KEY` | Full contents of `github-actions-key.json` |
+| Repository | `md-ammar-97/mcp-server-google` |
+| Branch | `^main$` |
+| Build type | **Dockerfile** |
+| Dockerfile location | `/Dockerfile` |
 
-Then delete the local key file:
+Continue to service configuration:
 
-```bash
-del github-actions-key.json   # Windows
-# rm github-actions-key.json  # macOS / Linux
-```
+| Setting | Value |
+|---|---|
+| Service name | `google-mcp-server` |
+| Region | `us-central1` |
+| Authentication | **Allow unauthenticated invocations** |
+| Minimum instances | `0` |
+| Maximum instances | `2` |
+
+Under **Container(s) → Variables & Secrets**:
+
+Add environment variable:
+
+| Name | Value |
+|---|---|
+| `APPROVAL_MODE` | `auto` |
+
+Add secrets as environment variables:
+
+| Environment variable | Secret | Version |
+|---|---|---|
+| `GOOGLE_CREDENTIALS_JSON` | `google-mcp-credentials` | `latest` |
+| `GOOGLE_TOKEN_JSON` | `google-mcp-token` | `latest` |
+| `SERVER_API_KEY` | `google-mcp-api-key` | `latest` |
+
+> Do **not** set `PORT` — Cloud Run injects it automatically.
+
+Click **Create**. Cloud Build triggers immediately.
 
 ---
 
-### Step 7 — Push to trigger the first deploy
+### Step 6 — Monitor the build
 
-The workflow in `.github/workflows/deploy.yml` runs automatically on every push to `main`:
+**Cloud Run → your service → Revisions** or **Cloud Build → History**
 
-```bash
-git push origin main
-```
-
-Monitor progress: **GitHub repo → Actions tab**
-
-On success the workflow prints the Cloud Run service URL.
+A successful first build takes 2–4 minutes. The service URL appears in the Cloud Run console once the revision is healthy.
 
 ---
 
-### Step 8 — Verify
+### Step 7 — Verify
 
-```bash
+```powershell
+# Health check (no auth)
 curl https://YOUR_SERVICE_URL/health
 # → {"status":"ok"}
-```
 
-The Cloud Run URL follows the pattern `https://google-mcp-server-XXXXXXXX-uc.a.run.app`.
+# Gmail draft
+curl -X POST https://YOUR_SERVICE_URL/create_email_draft `
+  -H "Content-Type: application/json" `
+  -H "X-API-Key: YOUR_API_KEY" `
+  -d '{"to":"mohdammar97@gmail.com","subject":"Cloud Run Test","body":"# Test\n\n**Works from Cloud Run!**\n\n- Point one\n- Point two"}'
+# → {"status":"ok","draft_id":"..."}
+
+# Google Doc append
+curl -X POST https://YOUR_SERVICE_URL/append_to_doc `
+  -H "Content-Type: application/json" `
+  -H "X-API-Key: YOUR_API_KEY" `
+  -d '{"doc_id":"YOUR_DOC_ID","content":"# Cloud Run Test\n\nAppended from production."}'
+# → {"status":"ok","doc_id":"...","chars_added":...}
+```
 
 ---
 
 ### Token rotation
 
-When `token.json` needs to be refreshed:
+If you get `invalid_grant`, regenerate `token.json` locally and push a new version:
 
-```bash
-# 1. Re-run OAuth locally to get a new token.json
+```powershell
 python -c "from auth import get_credentials; get_credentials()"
 
-# 2. Add a new version to the secret
-gcloud secrets versions add google-mcp-token \
-  --data-file=token.json \
-  --project YOUR_PROJECT_ID
-
-# 3. Re-deploy (or push any commit to main) to pick up the new version
+gcloud secrets versions add google-mcp-token `
+  --data-file="token.json" `
+  --project gen-lang-client-0491576843
 ```
+
+Then push any commit to `main` (or redeploy from the console) to pick up the new version.
 
 ---
 
@@ -363,11 +373,12 @@ gcloud secrets versions add google-mcp-token \
 
 | Topic | Detail |
 |---|---|
-| Credential injection | Cloud Run links `google-mcp-credentials` and `google-mcp-token` secrets as env vars (`GOOGLE_CREDENTIALS_JSON` / `GOOGLE_TOKEN_JSON`). `start.sh` writes them to `/tmp` and sets the path env vars before starting uvicorn. |
-| Token refresh | The embedded refresh token means Google auto-issues a new access token on each request — no manual re-auth between deployments. |
-| Scaling to zero | Cloud Run scales to zero when idle. `APPROVAL_MODE=auto` is set by the workflow so no terminal prompts block cold starts. |
-| HTTPS | Cloud Run provides a managed TLS certificate on the `*.run.app` domain automatically. Custom domains can be mapped in the Cloud Run console. |
-| Cost | The free tier includes 2 million requests/month and 360,000 GB-seconds of compute. Typical usage costs nothing. |
+| Credential injection | `start.sh` writes `GOOGLE_CREDENTIALS_JSON` / `GOOGLE_TOKEN_JSON` env vars to `/tmp` at container start, then sets `GOOGLE_CREDENTIALS_PATH` / `GOOGLE_TOKEN_PATH` before uvicorn launches. |
+| Token refresh | The refresh token inside `token.json` is long-lived. Google auto-issues a new access token on each start — no manual re-auth needed between deploys. |
+| Artifact Registry | Cloud Build creates and manages the `cloud-run-source-deploy` repository automatically. |
+| Scale to zero | Cloud Run scales to zero when idle. Cold start takes ~2 s. `APPROVAL_MODE=auto` prevents terminal prompts from blocking cold starts. |
+| HTTPS | Cloud Run provides a managed TLS certificate on `*.run.app` automatically. |
+| Cost | Free tier: 2 M requests/month + 360,000 GB-s compute. Typical usage costs nothing. |
 
 ---
 

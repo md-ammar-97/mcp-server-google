@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .env
 .venv/
+server_api_key.txt
+github-actions-key.json

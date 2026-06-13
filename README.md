@@ -152,46 +152,31 @@ docker run -d \
 
 ---
 
-## Deploy to Railway
+## Deploy to Cloud Run
 
-Railway builds from the Dockerfile and gives you a public HTTPS URL. Credentials are passed as base64-encoded environment variables and decoded to `/tmp` at startup by `start.sh`.
+Every push to `main` triggers Cloud Run's built-in continuous deployment (GitHub → Cloud Build → Cloud Run). Credentials are stored in Google Secret Manager and injected at runtime — never committed or baked into the image.
 
-### 1. Encode credentials (run locally in PowerShell)
+### How it works
 
-```powershell
-$creds = [Convert]::ToBase64String([IO.File]::ReadAllBytes("credentials.json"))
-$token = [Convert]::ToBase64String([IO.File]::ReadAllBytes("token.json"))
-Write-Host "GOOGLE_CREDENTIALS_B64=$creds"
-Write-Host "GOOGLE_TOKEN_B64=$token"
-```
+1. Cloud Run watches your GitHub repo (`main` branch)
+2. On each push, Cloud Build builds the Docker image and pushes it to Artifact Registry automatically
+3. Cloud Run deploys the new image
+4. `start.sh` writes `GOOGLE_CREDENTIALS_JSON` and `GOOGLE_TOKEN_JSON` (injected from Secret Manager) to `/tmp` before uvicorn starts
 
-### 2. Deploy
+### Quick setup
 
-1. Push this repo to GitHub
-2. Go to [railway.app](https://railway.app) → **New Project → Deploy from GitHub repo** → select this repo
-3. Railway detects the `Dockerfile` automatically
-
-### 3. Set environment variables in Railway dashboard
-
-| Variable | Value |
-|---|---|
-| `SERVER_API_KEY` | Strong random string |
-| `APPROVAL_MODE` | `auto` |
-| `GOOGLE_CREDENTIALS_B64` | Value from step 1 |
-| `GOOGLE_TOKEN_B64` | Value from step 1 |
-
-> Do **not** set `PORT` — Railway injects it automatically.
-
-### 4. Generate a public domain
-
-Railway dashboard → **your service → Settings → Networking → Generate Domain**
+1. Enable APIs: `run.googleapis.com`, `cloudbuild.googleapis.com`, `artifactregistry.googleapis.com`, `secretmanager.googleapis.com`
+2. Create three secrets in Secret Manager: `google-mcp-credentials`, `google-mcp-token`, `google-mcp-api-key`
+3. Grant the runtime service account `roles/secretmanager.secretAccessor` on each secret
+4. Cloud Run Console → **Create Service → Continuously deploy from repository** → connect `md-ammar-97/mcp-server-google`, branch `main`, build type `Dockerfile`
+5. Add env var `APPROVAL_MODE=auto` and link the three secrets as `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_TOKEN_JSON`, `SERVER_API_KEY`
 
 ```bash
-curl https://your-app.up.railway.app/health
+curl https://YOUR_SERVICE_URL/health
 # → {"status":"ok"}
 ```
 
-For full deployment options (local dev, Docker, VPS/systemd, Railway) see [`deployment_plan.md`](deployment_plan.md).
+For the full step-by-step guide with exact `gcloud` commands see [`deployment_plan.md`](deployment_plan.md).
 
 ---
 
