@@ -9,6 +9,7 @@ Send markdown-formatted content and it renders as properly styled Docs headings/
 
 - `POST /append_to_doc` — append formatted content to any Google Doc
 - `POST /create_email_draft` — create a styled HTML Gmail draft
+- `POST /send_email` - send a styled HTML Gmail message
 - Markdown rendering: headings, bold, italic, bullet lists, dividers
 - Operator approval gate before every Google API call (or auto-approve for pipelines)
 - Optional API key authentication via `X-Api-Key` request header
@@ -129,6 +130,21 @@ curl -i -X POST "$SERVICE_URL/create_email_draft" \
 ```
 
 The draft appears in Gmail → Drafts with full HTML formatting (600 px card, proper heading hierarchy, bullet lists).
+
+### Send a Gmail message
+
+Use the same payload as draft creation, but call the send endpoint:
+
+```bash
+curl -i -X POST "$SERVICE_URL/send_email" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: $API_KEY" \
+  --data-binary @payload.json
+```
+
+```json
+{"status": "ok", "message_id": "18f...", "thread_id": "18f..."}
+```
 
 ### Health check (no auth required)
 

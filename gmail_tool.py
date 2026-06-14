@@ -88,13 +88,10 @@ def _md_to_html(text: str) -> str:
     return "\n".join(parts)
 
 
-def create_email_draft(to: str, subject: str, body: str) -> dict:
-    """Create a Gmail draft with plain-text and styled HTML parts from markdown body."""
+def _build_raw_message(to: str, subject: str, body: str) -> str:
+    """Build a base64url-encoded multipart email for the Gmail API."""
     if not _EMAIL_RE.match(to):
         raise ValueError(f"Invalid email address: {to!r}")
-
-    creds = get_credentials()
-    service = build("gmail", "v1", credentials=creds)
 
     html_body = _HTML_TEMPLATE.replace("BODY_PLACEHOLDER", _md_to_html(body))
 
@@ -104,10 +101,36 @@ def create_email_draft(to: str, subject: str, body: str) -> dict:
     message.attach(MIMEText(body, "plain", "utf-8"))
     message.attach(MIMEText(html_body, "html", "utf-8"))
 
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    return base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+
+def create_email_draft(to: str, subject: str, body: str) -> dict:
+    """Create a Gmail draft with plain-text and styled HTML parts."""
+    raw = _build_raw_message(to, subject, body)
+    creds = get_credentials()
+    service = build("gmail", "v1", credentials=creds)
+
     draft = service.users().drafts().create(
         userId="me",
         body={"message": {"raw": raw}},
     ).execute()
 
     return {"status": "ok", "draft_id": draft["id"]}
+
+
+def send_email(to: str, subject: str, body: str) -> dict:
+    """Send a plain-text and styled HTML email through Gmail."""
+    raw = _build_raw_message(to, subject, body)
+    creds = get_credentials()
+    service = build("gmail", "v1", credentials=creds)
+
+    message = service.users().messages().send(
+        userId="me",
+        body={"raw": raw},
+    ).execute()
+
+    return {
+        "status": "ok",
+        "message_id": message["id"],
+        "thread_id": message.get("threadId", ""),
+    }

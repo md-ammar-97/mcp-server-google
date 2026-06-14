@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from docs_tool import append_to_doc
-from gmail_tool import create_email_draft
+from gmail_tool import create_email_draft, send_email
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -68,6 +68,7 @@ def root():
         "tools": [
             {"method": "POST", "path": "/append_to_doc",      "description": "Append text to a Google Doc"},
             {"method": "POST", "path": "/create_email_draft", "description": "Create a Gmail draft"},
+            {"method": "POST", "path": "/send_email",         "description": "Send a Gmail message"},
         ],
         "docs": f"http://localhost:{PORT}/docs",
     }
@@ -142,6 +143,21 @@ def create_draft_endpoint(req: CreateDraftRequest):
             raise HTTPException(status_code=403, detail="Action rejected by operator.")
         result = create_email_draft(req.to, req.subject, req.body)
         log.info("create_email_draft completed draft_id=%s", result.get("draft_id"))
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/send_email")
+def send_email_endpoint(req: CreateDraftRequest):
+    log.info("Received send_email request to=%s subject=%s", req.to, req.subject)
+    try:
+        preview = req.body[:100] + ("..." if len(req.body) > 100 else "")
+        payload = {"to": req.to, "subject": req.subject, "body (preview)": preview}
+        if not _approve("send_email", payload):
+            raise HTTPException(status_code=403, detail="Action rejected by operator.")
+        result = send_email(req.to, req.subject, req.body)
+        log.info("send_email completed message_id=%s", result.get("message_id"))
         return result
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
