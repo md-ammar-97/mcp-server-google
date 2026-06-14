@@ -9,7 +9,7 @@ Send markdown-formatted content and it renders as properly styled Docs headings/
 
 - `POST /append_to_doc` — append formatted content to any Google Doc
 - `POST /create_email_draft` — create a styled HTML Gmail draft
-- `POST /send_email` - send a styled HTML Gmail message
+- `POST /send_email` — send a styled HTML Gmail message
 - Markdown rendering: headings, bold, italic, bullet lists, dividers
 - Operator approval gate before every Google API call (or auto-approve for pipelines)
 - Optional API key authentication via `X-Api-Key` request header
@@ -19,7 +19,7 @@ Send markdown-formatted content and it renders as properly styled Docs headings/
 
 ## Markdown Syntax
 
-Both endpoints accept markdown in their text fields:
+All three content endpoints accept markdown in their text fields:
 
 | Syntax | Output |
 |---|---|
@@ -57,6 +57,7 @@ uvicorn server:app --reload
 ```
 
 On first run the browser opens for OAuth. After approving, `token.json` is saved and reused.
+The OAuth token requests Google Docs access plus Gmail's `gmail.compose` scope, which supports both draft creation and message sending.
 
 ```bash
 curl http://localhost:8000/health
@@ -154,6 +155,16 @@ curl https://mcp-server-google-695514226672.europe-west1.run.app/health
 ```
 
 Interactive docs: `http://localhost:8000/docs` (local only)
+
+---
+
+## Tests
+
+```bash
+python -m pytest tests -q
+```
+
+The current suite contains 6 tests covering authentication, approval behavior, document append, Gmail draft creation, and Gmail sending.
 
 ---
 

@@ -2,9 +2,10 @@
 
 ## Overview
 
-This server exposes two Google API actions over HTTP:
+This server exposes three Google API actions over HTTP:
 - `POST /append_to_doc` — append formatted text to a Google Doc
 - `POST /create_email_draft` — create a styled HTML Gmail draft
+- `POST /send_email` — send a styled HTML Gmail message
 
 All mutating endpoints require operator approval (configurable) and optionally an API key.
 
@@ -12,7 +13,7 @@ All mutating endpoints require operator approval (configurable) and optionally a
 
 ## Markdown Formatting Support
 
-Both endpoints accept markdown syntax in their text/body fields and render it professionally.
+All three content endpoints accept markdown syntax in their text/body fields and render it professionally.
 
 ### Supported syntax
 
@@ -39,7 +40,7 @@ Both endpoints accept markdown syntax in their text/body fields and render it pr
 *Thank you for your continued support.*
 ```
 
-Gmail drafts are sent as `multipart/alternative` (plain text + styled HTML card), so they render correctly in all email clients.
+Gmail drafts and sent messages use `multipart/alternative` (plain text + styled HTML card), so they render correctly across email clients.
 
 ---
 
@@ -355,6 +356,13 @@ curl -X POST https://mcp-server-google-695514226672.europe-west1.run.app/create_
   -d '{"to":"mohdammar97@gmail.com","subject":"Cloud Run Test","body":"# Test\n\n**Works from Cloud Run!**\n\n- Point one\n- Point two"}'
 # → {"status":"ok","draft_id":"..."}
 
+# Gmail send
+curl -X POST https://mcp-server-google-695514226672.europe-west1.run.app/send_email `
+  -H "Content-Type: application/json" `
+  -H "X-Api-Key: YOUR_API_KEY" `
+  -d '{"to":"recipient@example.com","subject":"Cloud Run Send Test","body":"# Test\n\n**This message was sent from Cloud Run.**"}'
+# → {"status":"ok","message_id":"...","thread_id":"..."}
+
 # Google Doc append
 curl -X POST https://mcp-server-google-695514226672.europe-west1.run.app/append_to_doc `
   -H "Content-Type: application/json" `
@@ -500,6 +508,28 @@ Response:
 {"status": "ok", "draft_id": "r12345abc"}
 ```
 
+Creating a draft only stores the message in Gmail Drafts. `APPROVAL_MODE=auto` approves the requested endpoint action; it does not convert a draft request into a send request.
+
+### Send a Gmail message
+
+Use the same payload shape as draft creation:
+
+```bash
+curl -X POST http://localhost:8000/send_email \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your-secret-key" \
+  -d '{
+    "to": "recipient@example.com",
+    "subject": "Project Update",
+    "body": "# Project Update\n\n**Status:** On track\n\n- Milestone A complete\n- Milestone B in progress\n\n*Regards*"
+  }'
+```
+
+Response:
+```json
+{"status": "ok", "message_id": "18f...", "thread_id": "18f..."}
+```
+
 ---
 
 ## Credential Management
@@ -531,5 +561,6 @@ Token expiry:
 - [x] Non-root Docker user (`appuser`) in Dockerfile
 - [x] `.dockerignore` prevents secrets from entering Docker build context
 - [x] No GitHub Actions — no `GCP_SA_KEY` or `GCP_PROJECT_ID` secrets in GitHub
+- [x] Production verification covers document append, Gmail draft creation, and Gmail sending
 - [ ] Rotate `SERVER_API_KEY` periodically (see API Key rotation section above)
 - [ ] Token volume is writable so token refreshes persist (handled by `/tmp` in Cloud Run)
